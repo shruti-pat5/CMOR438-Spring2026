@@ -1,46 +1,57 @@
 """
-This module implements three regression models from scratch using NumPy:
+Preprocessing utilities for the rice_ml package.
 
-    - LinearRegression: ordinary least squares regression
-    - RidgeRegression: L2-regularized linear regression
-    - LassoRegression: L1-regularized linear regression
+This module provides:
+- Input validation helpers
+- Feature scaling methods
+- Row normalization methods
+- Train/test and train/validation/test splitting
+
+The functions are intentionally lightweight and NumPy-only so they can be used
+throughout the custom machine learning package without relying on scikit-learn.
 """
-
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional, Sequence, Tuple, Union
 import numpy as np
 
-try:
-    from ..preprocessing import ArrayLike, standardize
-except ImportError: 
-    from ml_package.preprocessing import ArrayLike, standardize
 
+ArrayLike = Union[np.ndarray, Sequence[float], Sequence[Sequence[float]]]
 
 __all__ = [
-    "LinearRegression",
-    "RidgeRegression",
-    "LassoRegression",
+    "ArrayLike",
+    "standardize",
+    "minmax_scale",
+    "maxabs_scale",
+    "l1_normalize_rows",
+    "l2_normalize_rows",
+    "train_test_split",
+    "train_val_test_split",
 ]
 
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # Validation helpers
-# -----------------------------------------------------------------------------
+# =============================================================================
 
 def _as_2d_numeric_array(X: ArrayLike, name: str = "X") -> np.ndarray:
     """
-    Convert X to a non-empty 2D numeric NumPy array.
+    Convert input to a non-empty 2D numeric NumPy array.
 
-    This mirrors the expectations of the preprocessing module: features should
-    be represented as a 2D numeric matrix with shape
-    (n_samples, n_features).
+    Parameters
+    ----------
+    X : array-like
+        Input feature matrix.
+    name : str
+        Name used in error messages.
+
+    Returns
+    -------
+    np.ndarray
+        Float NumPy array with shape (n_samples, n_features).
     """
     arr = np.asarray(X)
-
-    if arr.ndim == 1:
-        arr = arr.reshape(-1, 1)
 
     if arr.ndim != 2:
         raise ValueError(f"{name} must be a 2D array; got {arr.ndim}D.")
@@ -62,490 +73,513 @@ def _as_2d_numeric_array(X: ArrayLike, name: str = "X") -> np.ndarray:
     return arr
 
 
-def _as_1d_numeric_array(y: ArrayLike, name: str = "y") -> np.ndarray:
+def _as_1d_array(y: Optional[ArrayLike], name: str = "y") -> Optional[np.ndarray]:
     """
-    Convert y to a non-empty 1D numeric NumPy array.
+    Convert target labels to a 1D NumPy array.
 
-    Linear, ridge, and lasso regression require numeric target values.
+    y can be numeric or categorical, so this function does not force float dtype.
     """
+    if y is None:
+        return None
+
     arr = np.asarray(y)
 
     if arr.ndim != 1:
-        arr = arr.ravel()
-
-    if arr.size == 0:
-        raise ValueError(f"{name} must be non-empty.")
-
-    try:
-        arr = arr.astype(float, copy=False)
-    except (TypeError, ValueError) as exc:
-        raise TypeError(f"All elements of {name} must be numeric for regression.") from exc
-
-    if np.isnan(arr).any():
-        raise ValueError(f"{name} contains NaN values. Handle missing data first.")
-
-    if np.isinf(arr).any():
-        raise ValueError(f"{name} contains infinite values. Handle extreme data first.")
+        raise ValueError(f"{name} must be a 1D array; got {arr.ndim}D.")
 
     return arr
 
 
-def _validate_X_y(X: ArrayLike, y: ArrayLike) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Validate a feature matrix X and numeric target vector y.
-    """
-    X_arr = _as_2d_numeric_array(X, name="X")
-    y_arr = _as_1d_numeric_array(y, name="y")
-
-    if X_arr.shape[0] != y_arr.shape[0]:
+def _check_matching_rows(X: np.ndarray, y: Optional[np.ndarray]) -> None:
+    """Check that X and y have the same number of observations."""
+    if y is not None and X.shape[0] != y.shape[0]:
         raise ValueError(
-            "X and y must have the same number of rows; "
-            f"got X.shape[0]={X_arr.shape[0]} and len(y)={len(y_arr)}."
+            f"X and y must have the same number of rows; "
+            f"got X.shape[0]={X.shape[0]} and len(y)={len(y)}."
         )
 
-    return X_arr, y_arr
+
+def _check_fraction(value: float, name: str) -> float:
+    """Validate that a split size is a float strictly between 0 and 1."""
+    if not isinstance(value, (int, float)):
+        raise TypeError(f"{name} must be numeric.")
+
+    value = float(value)
+
+    if not 0.0 < value < 1.0:
+        raise ValueError(f"{name} must be in the interval (0, 1).")
+
+    return value
 
 
-def _add_intercept_column(X: np.ndarray) -> np.ndarray:
+def _make_rng(random_state: Optional[int]) -> np.random.Generator:
+    """Create a NumPy random number generator from an optional seed."""
+    if random_state is None:
+        return np.random.default_rng()
+
+    if not isinstance(random_state, (int, np.integer)):
+        raise TypeError("random_state must be an integer or None.")
+
+    return np.random.default_rng(int(random_state))
+
+
+def _safe_scale(scale: np.ndarray) -> np.ndarray:
     """
-    Add a column of ones to X for the intercept term.
+    Replace zero scale values with 1.
+
+    This avoids division by zero for constant columns.
     """
-    ones = np.ones((X.shape[0], 1))
-    return np.hstack((ones, X))
+    scale = scale.astype(float, copy=True)
+    scale[scale == 0.0] = 1.0
+    return scale
 
 
-def _r2_score(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+# =============================================================================
+# Feature scaling
+# =============================================================================
+
+def standardize(
+    X: ArrayLike,
+    *,
+    with_mean: bool = True,
+    with_std: bool = True,
+    ddof: int = 0,
+    return_params: bool = False,
+    mean: Optional[np.ndarray] = None,
+    scale: Optional[np.ndarray] = None,
+) -> Union[np.ndarray, Tuple[np.ndarray, dict[str, np.ndarray]]]:
     """
-    Compute R^2, the coefficient of determination.
+    Standardize features column-by-column using z-score scaling.
 
-    R^2 = 1 - SSE / SST
-    """
-    y_true = _as_1d_numeric_array(y_true, name="y_true")
-    y_pred = _as_1d_numeric_array(y_pred, name="y_pred")
+    The usual transformation is:
 
-    if y_true.shape[0] != y_pred.shape[0]:
-        raise ValueError("y_true and y_pred must have the same length.")
+        X_scaled = (X - mean) / standard_deviation
 
-    ss_res = np.sum((y_true - y_pred) ** 2)
-    ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
+    This function supports two modes:
 
-    if ss_tot == 0:
-        return 0.0
+    1. Fit-transform mode:
+       If mean and scale are not provided, they are calculated from X.
 
-    return float(1.0 - ss_res / ss_tot)
-
-
-def _soft_threshold(value: float, penalty: float) -> float:
-    """
-    Soft-thresholding operator for lasso regression.
-
-    This is what allows lasso to shrink some coefficients exactly to zero.
-    """
-    if value > penalty:
-        return value - penalty
-    if value < -penalty:
-        return value + penalty
-    return 0.0
-
-
-# -----------------------------------------------------------------------------
-# Base model
-# -----------------------------------------------------------------------------
-
-class BaseLinearModel:
-    """
-    Shared functionality for linear, ridge, and lasso regression.
+    2. Transform-only mode:
+       If mean and scale are provided, they are reused to transform X.
+       This is useful for applying training-set parameters to validation/test data.
 
     Parameters
     ----------
-    fit_intercept : bool, default=True
-        Whether to include an intercept term.
-    standardize : bool, default=False
-        Whether to standardize features internally using the package's
-        preprocessing.standardize() function.
+    X : array-like, shape (n_samples, n_features)
+        Feature matrix.
+    with_mean : bool, default=True
+        Whether to subtract the column means.
+    with_std : bool, default=True
+        Whether to divide by the column standard deviations.
+    ddof : int, default=0
+        Delta degrees of freedom used in standard deviation calculation.
+    return_params : bool, default=False
+        If True, return the learned mean and scale.
+    mean : np.ndarray, optional
+        Precomputed column means.
+    scale : np.ndarray, optional
+        Precomputed column standard deviations.
 
-        If you already standardized X using preprocessing.standardize(), set
-        standardize=False to avoid scaling twice.
+    Returns
+    -------
+    np.ndarray
+        Standardized feature matrix.
+
+    Or, if return_params=True:
+
+    (np.ndarray, dict)
+        Standardized matrix and learned parameters.
     """
+    X_arr = _as_2d_numeric_array(X)
 
-    def __init__(self, fit_intercept: bool = True, standardize: bool = False):
-        self.fit_intercept = fit_intercept
-        self.standardize = standardize
+    using_saved_params = mean is not None or scale is not None
 
-        self.coef_: Optional[np.ndarray] = None
-        self.intercept_: Optional[float] = None
-        self.is_fitted_: bool = False
+    if using_saved_params:
+        if mean is None or scale is None:
+            raise ValueError("Both mean and scale must be provided together.")
 
-        self._standardize_params: Optional[dict[str, np.ndarray]] = None
-        self.n_features_in_: Optional[int] = None
+        mean = np.asarray(mean, dtype=float)
+        scale = np.asarray(scale, dtype=float)
 
-    def _prepare_X_fit(self, X: np.ndarray) -> np.ndarray:
-        """
-        Prepare X during model fitting.
-        """
-        self.n_features_in_ = X.shape[1]
+        if mean.shape != (X_arr.shape[1],):
+            raise ValueError("mean must have shape (n_features,).")
 
-        if self.standardize:
-            X, self._standardize_params = standardize(X, return_params=True)
+        if scale.shape != (X_arr.shape[1],):
+            raise ValueError("scale must have shape (n_features,).")
 
-        if self.fit_intercept:
-            X = _add_intercept_column(X)
+        mean_used = mean if with_mean else np.zeros(X_arr.shape[1])
+        scale_used = _safe_scale(scale) if with_std else np.ones(X_arr.shape[1])
 
-        return X
+    else:
+        mean_used = X_arr.mean(axis=0) if with_mean else np.zeros(X_arr.shape[1])
+        centered = X_arr - mean_used
 
-    def _prepare_X_predict(self, X: ArrayLike) -> np.ndarray:
-        """
-        Prepare X during prediction.
-        """
-        self._check_is_fitted()
-
-        X_arr = _as_2d_numeric_array(X, name="X")
-
-        if X_arr.shape[1] != self.n_features_in_:
-            raise ValueError(
-                "X has the wrong number of features; "
-                f"expected {self.n_features_in_}, got {X_arr.shape[1]}."
-            )
-
-        if self.standardize:
-            if self._standardize_params is None:
-                raise ValueError("Missing standardization parameters. Refit the model.")
-
-            X_arr = standardize(
-                X_arr,
-                mean=self._standardize_params["mean"],
-                scale=self._standardize_params["scale"],
-            )
-
-        if self.fit_intercept:
-            X_arr = _add_intercept_column(X_arr)
-
-        return X_arr
-
-    def _store_parameters(self, beta: np.ndarray) -> None:
-        """
-        Store learned intercept and coefficient values.
-        """
-        if self.fit_intercept:
-            self.intercept_ = float(beta[0])
-            self.coef_ = beta[1:].astype(float, copy=False)
+        if with_std:
+            scale_used = _safe_scale(centered.std(axis=0, ddof=ddof))
         else:
-            self.intercept_ = 0.0
-            self.coef_ = beta.astype(float, copy=False)
+            scale_used = np.ones(X_arr.shape[1])
 
-        self.is_fitted_ = True
+    X_out = (X_arr - mean_used) / scale_used
 
-    def _full_beta(self) -> np.ndarray:
-        """
-        Return the full coefficient vector, including intercept if needed.
-        """
-        self._check_is_fitted()
+    if return_params:
+        return X_out, {"mean": mean_used, "scale": scale_used}
 
-        if self.coef_ is None or self.intercept_ is None:
-            raise ValueError("Model parameters are missing. Refit the model.")
+    return X_out
 
-        if self.fit_intercept:
-            return np.concatenate(([self.intercept_], self.coef_))
 
-        return self.coef_
+def minmax_scale(
+    X: ArrayLike,
+    *,
+    feature_range: Tuple[float, float] = (0.0, 1.0),
+    return_params: bool = False,
+    data_min: Optional[np.ndarray] = None,
+    data_range: Optional[np.ndarray] = None,
+) -> Union[np.ndarray, Tuple[np.ndarray, dict[str, Any]]]:
+    """
+    Scale each feature to a chosen range.
 
-    def _check_is_fitted(self) -> None:
-        """
-        Raise an error if fit() has not been called.
-        """
-        if not self.is_fitted_:
-            raise ValueError("This model has not been fitted yet. Call fit(X, y) first.")
+    By default, this maps each column to the interval [0, 1].
 
-    def predict(self, X: ArrayLike) -> np.ndarray:
-        """
-        Predict target values for X.
+    Formula:
 
-        Parameters
-        ----------
-        X : array-like, shape (n_samples, n_features)
-            Feature matrix.
+        X_scaled = (X - min) / (max - min)
+        X_out = X_scaled * (new_max - new_min) + new_min
 
-        Returns
-        -------
-        np.ndarray
-            Predicted target values.
-        """
-        X_design = self._prepare_X_predict(X)
-        beta = self._full_beta()
-        return X_design @ beta
+    Parameters
+    ----------
+    X : array-like, shape (n_samples, n_features)
+        Feature matrix.
+    feature_range : tuple, default=(0.0, 1.0)
+        Desired output range.
+    return_params : bool, default=False
+        If True, return the learned min and range.
+    data_min : np.ndarray, optional
+        Precomputed original column minimums.
+    data_range : np.ndarray, optional
+        Precomputed original column ranges.
 
-    def score(self, X: ArrayLike, y: ArrayLike) -> float:
-        """
-        Return the R^2 score on X and y.
-        """
-        y_arr = _as_1d_numeric_array(y, name="y")
-        y_pred = self.predict(X)
-        return _r2_score(y_arr, y_pred)
+    Returns
+    -------
+    np.ndarray
+        Min-max scaled feature matrix.
+    """
+    X_arr = _as_2d_numeric_array(X)
 
-    def get_params(self) -> dict[str, object]:
-        """
-        Return basic model configuration parameters.
-        """
-        return {
-            "fit_intercept": self.fit_intercept,
-            "standardize": self.standardize,
+    if (
+        not isinstance(feature_range, tuple)
+        or len(feature_range) != 2
+        or not all(isinstance(v, (int, float)) for v in feature_range)
+    ):
+        raise ValueError("feature_range must be a tuple of two numeric values.")
+
+    new_min, new_max = map(float, feature_range)
+
+    if new_min >= new_max:
+        raise ValueError("feature_range must satisfy min < max.")
+
+    using_saved_params = data_min is not None or data_range is not None
+
+    if using_saved_params:
+        if data_min is None or data_range is None:
+            raise ValueError("Both data_min and data_range must be provided together.")
+
+        data_min = np.asarray(data_min, dtype=float)
+        data_range = np.asarray(data_range, dtype=float)
+
+        if data_min.shape != (X_arr.shape[1],):
+            raise ValueError("data_min must have shape (n_features,).")
+
+        if data_range.shape != (X_arr.shape[1],):
+            raise ValueError("data_range must have shape (n_features,).")
+
+        min_used = data_min
+        range_used = _safe_scale(data_range)
+
+    else:
+        min_used = X_arr.min(axis=0)
+        max_used = X_arr.max(axis=0)
+        range_used = _safe_scale(max_used - min_used)
+
+    X_01 = (X_arr - min_used) / range_used
+    X_out = X_01 * (new_max - new_min) + new_min
+
+    if return_params:
+        return X_out, {
+            "data_min": min_used,
+            "data_range": range_used,
+            "feature_range": (new_min, new_max),
         }
 
+    return X_out
 
-# -----------------------------------------------------------------------------
-# Linear regression
-# -----------------------------------------------------------------------------
 
-class LinearRegression(BaseLinearModel):
+def maxabs_scale(
+    X: ArrayLike,
+    *,
+    return_params: bool = False,
+    scale: Optional[np.ndarray] = None,
+) -> Union[np.ndarray, Tuple[np.ndarray, dict[str, np.ndarray]]]:
     """
-    Ordinary least squares linear regression.
+    Scale each feature by its maximum absolute value.
 
-    This model minimizes the residual sum of squares:
+    Formula:
 
-        sum((y_i - y_hat_i)^2)
+        X_scaled = X / max(abs(X))
+
+    This keeps zero-centered data zero-centered and is often useful when data
+    is sparse or already centered.
+    """
+    X_arr = _as_2d_numeric_array(X)
+
+    if scale is not None:
+        scale_used = np.asarray(scale, dtype=float)
+
+        if scale_used.shape != (X_arr.shape[1],):
+            raise ValueError("scale must have shape (n_features,).")
+
+        scale_used = _safe_scale(scale_used)
+
+    else:
+        scale_used = _safe_scale(np.max(np.abs(X_arr), axis=0))
+
+    X_out = X_arr / scale_used
+
+    if return_params:
+        return X_out, {"scale": scale_used}
+
+    return X_out
+
+
+# =============================================================================
+# Row normalization
+# =============================================================================
+
+def l1_normalize_rows(X: ArrayLike, *, eps: float = 1e-12) -> np.ndarray:
+    """
+    Normalize each row so its L1 norm equals 1.
+
+    The L1 norm is the sum of absolute values in a row.
+
+    Rows containing all zeros remain all zeros.
+    """
+    if eps <= 0:
+        raise ValueError("eps must be positive.")
+
+    X_arr = _as_2d_numeric_array(X)
+    norms = np.sum(np.abs(X_arr), axis=1)
+    denominator = np.maximum(norms, eps)[:, None]
+
+    return X_arr / denominator
+
+
+def l2_normalize_rows(X: ArrayLike, *, eps: float = 1e-12) -> np.ndarray:
+    """
+    Normalize each row so its L2 norm equals 1.
+
+    The L2 norm is the usual Euclidean length of a row.
+
+    Rows containing all zeros remain all zeros.
+    """
+    if eps <= 0:
+        raise ValueError("eps must be positive.")
+
+    X_arr = _as_2d_numeric_array(X)
+    norms = np.sqrt(np.sum(X_arr ** 2, axis=1))
+    denominator = np.maximum(norms, eps)[:, None]
+
+    return X_arr / denominator
+
+
+# =============================================================================
+# Dataset splitting
+# =============================================================================
+
+def _stratified_split_indices(
+    stratify: np.ndarray,
+    test_size: float,
+    rng: np.random.Generator,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Create train/test indices while preserving class proportions.
+
+    This is used for classification tasks where each class should appear in
+    approximately the same proportions in the train and test sets.
+    """
+    classes, encoded = np.unique(stratify, return_inverse=True)
+
+    train_indices: list[int] = []
+    test_indices: list[int] = []
+
+    for class_id in range(len(classes)):
+        class_indices = np.flatnonzero(encoded == class_id)
+        rng.shuffle(class_indices)
+
+        n_class = len(class_indices)
+        n_test = int(round(test_size * n_class))
+
+        if n_class > 1:
+            n_test = min(max(n_test, 1), n_class - 1)
+        else:
+            n_test = 0
+
+        test_indices.extend(class_indices[:n_test])
+        train_indices.extend(class_indices[n_test:])
+
+    train_indices = np.asarray(train_indices)
+    test_indices = np.asarray(test_indices)
+
+    rng.shuffle(train_indices)
+    rng.shuffle(test_indices)
+
+    return train_indices, test_indices
+
+
+def train_test_split(
+    X: ArrayLike,
+    y: Optional[ArrayLike] = None,
+    *,
+    test_size: float = 0.25,
+    random_state: Optional[int] = None,
+    shuffle: bool = True,
+    stratify: Optional[ArrayLike] = None,
+):
+    """
+    Split data into training and test sets.
 
     Parameters
     ----------
-    fit_intercept : bool, default=True
-        Whether to include an intercept term.
-    standardize : bool, default=False
-        Whether to standardize features internally.
+    X : array-like, shape (n_samples, n_features)
+        Feature matrix.
+    y : array-like, optional
+        Target vector.
+    test_size : float, default=0.25
+        Proportion of data placed in the test set.
+    random_state : int, optional
+        Seed for reproducible shuffling.
+    shuffle : bool, default=True
+        Whether to shuffle rows before splitting.
+    stratify : array-like, optional
+        Class labels used to preserve class proportions across splits.
 
-        Linear regression does not require standardization, but it can still be
-        useful for comparing coefficient sizes.
+    Returns
+    -------
+    If y is provided:
+        X_train, X_test, y_train, y_test
+
+    If y is not provided:
+        X_train, X_test
     """
+    X_arr = _as_2d_numeric_array(X)
+    y_arr = _as_1d_array(y)
+    _check_matching_rows(X_arr, y_arr)
 
-    def __init__(self, fit_intercept: bool = True, standardize: bool = False):
-        super().__init__(fit_intercept=fit_intercept, standardize=standardize)
+    test_size = _check_fraction(test_size, "test_size")
+    rng = _make_rng(random_state)
 
-    def fit(self, X: ArrayLike, y: ArrayLike) -> "LinearRegression":
-        """
-        Fit the ordinary least squares model.
-        """
-        X_arr, y_arr = _validate_X_y(X, y)
-        X_design = self._prepare_X_fit(X_arr)
+    n_samples = X_arr.shape[0]
 
-        # The pseudoinverse is more stable than manually computing
-        # inverse(X.T @ X) @ X.T @ y, especially if columns are correlated.
-        beta = np.linalg.pinv(X_design) @ y_arr
+    if n_samples < 2:
+        raise ValueError("At least two samples are required to split data.")
 
-        self._store_parameters(beta)
-        return self
+    if stratify is not None:
+        stratify_arr = _as_1d_array(stratify, name="stratify")
 
+        if stratify_arr.shape[0] != n_samples:
+            raise ValueError("stratify must have the same length as X.")
 
-# -----------------------------------------------------------------------------
-# Ridge regression
-# -----------------------------------------------------------------------------
-
-class RidgeRegression(BaseLinearModel):
-    """
-    Ridge regression with L2 regularization.
-
-    This model minimizes:
-
-        sum((y_i - y_hat_i)^2) + alpha * sum(beta_j^2)
-
-    The intercept is not regularized.
-
-    Parameters
-    ----------
-    alpha : float, default=1.0
-        Strength of L2 regularization. Must be nonnegative.
-    fit_intercept : bool, default=True
-        Whether to include an intercept term.
-    standardize : bool, default=True
-        Whether to standardize features internally.
-
-        Ridge regression is sensitive to feature scale, so this defaults to
-        True. If you already used preprocessing.standardize(), set this to
-        False.
-    """
-
-    def __init__(
-        self,
-        alpha: float = 1.0,
-        fit_intercept: bool = True,
-        standardize: bool = True,
-    ):
-        super().__init__(fit_intercept=fit_intercept, standardize=standardize)
-
-        if alpha < 0:
-            raise ValueError("alpha must be nonnegative.")
-
-        self.alpha = float(alpha)
-
-    def fit(self, X: ArrayLike, y: ArrayLike) -> "RidgeRegression":
-        """
-        Fit the ridge regression model.
-        """
-        X_arr, y_arr = _validate_X_y(X, y)
-        X_design = self._prepare_X_fit(X_arr)
-
-        n_features = X_design.shape[1]
-        penalty_matrix = np.eye(n_features)
-
-        # Do not penalize the intercept.
-        if self.fit_intercept:
-            penalty_matrix[0, 0] = 0.0
-
-        beta = (
-            np.linalg.pinv(X_design.T @ X_design + self.alpha * penalty_matrix)
-            @ X_design.T
-            @ y_arr
+        train_idx, test_idx = _stratified_split_indices(
+            stratify_arr,
+            test_size=test_size,
+            rng=rng,
         )
 
-        self._store_parameters(beta)
-        return self
+    else:
+        indices = np.arange(n_samples)
 
-    def get_params(self) -> dict[str, object]:
-        """
-        Return model configuration parameters.
-        """
-        params = super().get_params()
-        params["alpha"] = self.alpha
-        return params
+        if shuffle:
+            rng.shuffle(indices)
+
+        n_test = int(round(test_size * n_samples))
+        n_test = min(max(n_test, 1), n_samples - 1)
+
+        test_idx = indices[:n_test]
+        train_idx = indices[n_test:]
+
+    if y_arr is None:
+        return X_arr[train_idx], X_arr[test_idx]
+
+    return X_arr[train_idx], X_arr[test_idx], y_arr[train_idx], y_arr[test_idx]
 
 
-# -----------------------------------------------------------------------------
-# Lasso regression
-# -----------------------------------------------------------------------------
-
-class LassoRegression(BaseLinearModel):
+def train_val_test_split(
+    X: ArrayLike,
+    y: Optional[ArrayLike] = None,
+    *,
+    val_size: float = 0.20,
+    test_size: float = 0.20,
+    random_state: Optional[int] = None,
+    shuffle: bool = True,
+    stratify: Optional[ArrayLike] = None,
+):
     """
-    Lasso regression with L1 regularization using coordinate descent.
+    Split data into training, validation, and test sets.
 
-    This model minimizes approximately:
+    The sizes are interpreted as proportions of the original dataset.
 
-        (1 / (2n)) * sum((y_i - y_hat_i)^2) + alpha * sum(abs(beta_j))
+    Example
+    -------
+    If val_size=0.2 and test_size=0.2, then approximately:
 
-    The intercept is not regularized.
-
-    Parameters
-    ----------
-    alpha : float, default=1.0
-        Strength of L1 regularization. Must be nonnegative.
-    fit_intercept : bool, default=True
-        Whether to include an intercept term.
-    standardize : bool, default=True
-        Whether to standardize features internally.
-
-        Lasso regression is sensitive to feature scale, so this defaults to
-        True. If you already used preprocessing.standardize(), set this to
-        False.
-    max_iter : int, default=1000
-        Maximum number of coordinate descent iterations.
-    tol : float, default=1e-6
-        Convergence tolerance based on the largest coefficient change.
+    - 60% training
+    - 20% validation
+    - 20% test
     """
+    val_size = _check_fraction(val_size, "val_size")
+    test_size = _check_fraction(test_size, "test_size")
 
-    def __init__(
-        self,
-        alpha: float = 1.0,
-        fit_intercept: bool = True,
-        standardize: bool = True,
-        max_iter: int = 1000,
-        tol: float = 1e-6,
-    ):
-        super().__init__(fit_intercept=fit_intercept, standardize=standardize)
+    if val_size + test_size >= 1.0:
+        raise ValueError("val_size + test_size must be less than 1.")
 
-        if alpha < 0:
-            raise ValueError("alpha must be nonnegative.")
-        if max_iter <= 0:
-            raise ValueError("max_iter must be positive.")
-        if tol <= 0:
-            raise ValueError("tol must be positive.")
-
-        self.alpha = float(alpha)
-        self.max_iter = int(max_iter)
-        self.tol = float(tol)
-        self.n_iter_: int = 0
-
-    def fit(self, X: ArrayLike, y: ArrayLike) -> "LassoRegression":
-        """
-        Fit the lasso regression model using coordinate descent.
-        """
-        X_arr, y_arr = _validate_X_y(X, y)
-        X_design = self._prepare_X_fit(X_arr)
-
-        n_samples, n_features = X_design.shape
-        beta = np.zeros(n_features)
-
-        # Average squared column norm. Used in the coordinate update formula.
-        column_norms = np.sum(X_design ** 2, axis=0) / n_samples
-
-        for iteration in range(self.max_iter):
-            beta_old = beta.copy()
-
-            for j in range(n_features):
-                if column_norms[j] == 0:
-                    continue
-
-                # Partial residual for coordinate j:
-                # remove current contribution of feature j, then update beta[j].
-                y_pred = X_design @ beta
-                residual = y_arr - y_pred + X_design[:, j] * beta[j]
-
-                rho = np.sum(X_design[:, j] * residual) / n_samples
-
-                # Do not regularize the intercept column.
-                if self.fit_intercept and j == 0:
-                    beta[j] = rho / column_norms[j]
-                else:
-                    beta[j] = _soft_threshold(rho, self.alpha) / column_norms[j]
-
-            max_change = np.max(np.abs(beta - beta_old))
-            self.n_iter_ = iteration + 1
-
-            if max_change < self.tol:
-                break
-
-        self._store_parameters(beta)
-        return self
-
-    def get_params(self) -> dict[str, object]:
-        """
-        Return model configuration parameters.
-        """
-        params = super().get_params()
-        params.update(
-            {
-                "alpha": self.alpha,
-                "max_iter": self.max_iter,
-                "tol": self.tol,
-            }
+    if y is not None:
+        X_temp, X_test, y_temp, y_test = train_test_split(
+            X,
+            y,
+            test_size=test_size,
+            random_state=random_state,
+            shuffle=shuffle,
+            stratify=stratify,
         )
-        return params
 
+        relative_val_size = val_size / (1.0 - test_size)
 
-# -----------------------------------------------------------------------------
-# Example usage
-# -----------------------------------------------------------------------------
+        stratify_temp = y_temp if stratify is not None else None
 
-if __name__ == "__main__":
-    X = np.array(
-        [
-            [1.0, 2.0],
-            [2.0, 1.0],
-            [3.0, 4.0],
-            [4.0, 3.0],
-            [5.0, 5.0],
-        ]
+        X_train, X_val, y_train, y_val = train_test_split(
+            X_temp,
+            y_temp,
+            test_size=relative_val_size,
+            random_state=random_state,
+            shuffle=shuffle,
+            stratify=stratify_temp,
+        )
+
+        return X_train, X_val, X_test, y_train, y_val, y_test
+
+    X_temp, X_test = train_test_split(
+        X,
+        test_size=test_size,
+        random_state=random_state,
+        shuffle=shuffle,
     )
 
-    y = np.array([3.0, 3.5, 6.0, 6.5, 8.0])
+    relative_val_size = val_size / (1.0 - test_size)
 
-    models = {
-        "Linear Regression": LinearRegression(),
-        "Ridge Regression": RidgeRegression(alpha=1.0),
-        "Lasso Regression": LassoRegression(alpha=0.1),
-    }
+    X_train, X_val = train_test_split(
+        X_temp,
+        test_size=relative_val_size,
+        random_state=random_state,
+        shuffle=shuffle,
+    )
 
-    for name, model in models.items():
-        model.fit(X, y)
-        predictions = model.predict(X)
-
-        print(f"\n{name}")
-        print("Intercept:", model.intercept_)
-        print("Coefficients:", model.coef_)
-        print("Predictions:", predictions)
-        print("R^2:", model.score(X, y))
+    return X_train, X_val, X_test

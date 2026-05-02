@@ -13,11 +13,9 @@ from typing import Optional
 import numpy as np
 
 try:
-    from ..preprocessing import ArrayLike, standardize
-except ImportError:  # pragma: no cover
-    from ml_package.preprocessing import ArrayLike, standardize
-
-
+    from ml_package.processing.preprocessing import ArrayLike, standardize
+except ImportError:  # allows running from inside the package
+    from ..processing.preprocessing import ArrayLike, standardize
 __all__ = ["LogisticRegression"]
 
 
