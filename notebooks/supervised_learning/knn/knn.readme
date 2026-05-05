@@ -1,0 +1,107 @@
+# $k$-Nearest Neighbors
+
+> **Topic:** k-Nearest Neighbors (from scratch), Classification Error, k-Selection, Wine Recommender
+> **Dataset:** Wine Dataset
+
+
+---
+
+## Overview
+
+This notebook builds the **$k$-Nearest Neighbors (KNN)** algorithm entirely from scratch using NumPy and applies it to the Wine dataset. No `sklearn` model classes are used for training — every component (`distance`, `k_nearest_neighbors`, `KNN_predict`, `classification_error`) is implemented directly.
+
+The notebook covers the full KNN workflow: from a from-scratch Euclidean distance function through majority-vote classification, to a sweep over odd values of $k$ to find the optimal neighbourhood size. It also includes a **wine recommender system** — a natural application of KNN that demonstrates how the same algorithm used for classification can be repurposed to answer "given a wine I liked, which other wines are most similar?"
+
+---
+
+## Libraries Used
+
+| Library | Purpose |
+|:--------|:--------|
+| `numpy` | All from-scratch implementations and array operations |
+| `pandas` | Data loading and catalogue construction for the recommender |
+| `matplotlib` / `seaborn` | Visualisations (class distribution, heatmap, scatter plot, error curve, confusion matrix) |
+| `sklearn.datasets` | `load_wine` — dataset loading only |
+| `sklearn.model_selection` | `train_test_split` |
+
+---
+
+## Dataset
+
+| Property | Value |
+|:---------|:------|
+| **Name** | Wine Dataset |
+| **Source** | `sklearn.datasets.load_wine()` |
+| **Samples** | 178 |
+| **Features** | 13 numeric chemical features (alcohol, malic acid, ash, flavanoids, proline, etc.) |
+| **Target** | Cultivar class — 3 classes (class_0, class_1, class_2) |
+| **Task type** | Multiclass Classification |
+| **Train / Test split** | 67% / 33% (stratified) |
+
+---
+
+## Notebook Structure
+
+| Section | Description |
+|:--------|:------------|
+| 1. Setup | Imports and plot configuration |
+| 2. Load the Wine Dataset | Feature matrix, target vector, class distribution, descriptive statistics |
+| 3. Exploratory Data Analysis | Class distribution bar chart, correlation heatmap, Flavanoids vs. Proline scatter plot |
+| 4. Train / Test Split | 67/33 stratified split |
+| 5. Euclidean Distance | From-scratch `distance(p, q)` function; sanity check between two samples |
+| 6. $k$-Nearest Neighbors | From-scratch `k_nearest_neighbors` — returns $k$ closest (feature, label, distance) triples |
+| 7. KNN Predict | From-scratch `KNN_predict` — majority vote for classification; mean for regression |
+| 8. Classification Error | From-scratch `classification_error` — fraction of misclassified test samples |
+| 9. Choosing the Right $k$ | Sweep odd $k$ ∈ {1, 3, 5, …, 25}; table and error-vs-$k$ plot; identify best $k$ |
+| 10. Evaluate at Best $k$ | Test accuracy, per-class accuracy breakdown, manual confusion matrix |
+| 11. Wine Recommender System | Build a named wine catalogue; `wine_recommendations` finds $k$ most chemically similar wines |
+| 12. Summary | Key takeaways, strengths and weaknesses of KNN |
+
+---
+
+## Key Ideas
+
+### Euclidean Distance
+
+KNN defines similarity through **Euclidean distance** between feature vectors:
+
+$$d(p, q) = \sqrt{(p - q)^\top (p - q)}$$
+
+All 13 features contribute equally to this distance, so the relative scale of each feature matters. Larger-magnitude features (e.g. proline ≈ 278–1680) would dominate the distance calculation over smaller ones (e.g. ash ≈ 1.4–3.2) if the features were not already on comparable scales in this dataset.
+
+---
+
+### The KNN Algorithm
+
+For each query point:
+
+1. Compute the distance to every training point.
+2. Sort training points by distance (ascending).
+3. Take the $k$ closest.
+4. Return the **majority label** (classification) or **mean** (regression).
+
+There is no training phase — the model *is* the data. All computation happens at prediction time, which makes KNN memory-efficient to "train" but slow at prediction for large datasets.
+
+---
+
+### Classification Error
+
+$$\text{Error}(k) = \frac{\text{number of misclassifications}}{n_{\text{test}}}$$
+
+The complement, accuracy = $1 - \text{Error}$, is reported after the optimal $k$ is selected.
+
+---
+
+### Choosing $k$
+
+The $k$ sweep (Section 9) illustrates the bias–variance trade-off directly:
+
+| $k$ | Effect |
+|:----|:-------|
+| Small (e.g. $k=1$) | Low bias, high variance — prediction changes dramatically with small data shifts |
+| Large (e.g. $k=25$) | High bias, low variance — decision boundary over-smoothed, misses local structure |
+| Optimal | Minimum test error; found by plotting error vs. $k$ and identifying the elbow |
+
+The notebook sweeps only **odd** values to avoid ties in majority voting.
+
+---
