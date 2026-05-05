@@ -6,7 +6,6 @@
 ---
 
 ## Overview
-
 This notebook applies **Principal Component Analysis (PCA)** to the Wine dataset, working through the full five-step pipeline both manually (via `numpy.linalg.svd`) and using `sklearn`. PCA is introduced as a tool for two distinct but related purposes:
 
 1. **Dimensionality reduction** — compressing 13 chemical features into a small number of principal components while retaining as much variance as possible.
